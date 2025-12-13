@@ -50,7 +50,7 @@ We provide **professional-level training** in DevSecOps, covering tools and prac
 
 ### 🚀 **Complete GitLab DevOps Bootcamp: CI/CD, Terraform, Ansible**
 - Get started with gitlab devops tutorial . 
-[**AWS DevOps Practice Test**](https://www.udemy.com/course/complete-gitlab-devops-bootcamp-cicd-terraform-ansible/?referralCode=8C54F936960F5B9F7177)
+[**Complete GitLab DevOps Bootcamp: CI/CD, Terraform, Ansible**](https://www.udemy.com/course/complete-gitlab-devops-bootcamp-cicd-terraform-ansible/?referralCode=8C54F936960F5B9F7177)
 
 
 ---
