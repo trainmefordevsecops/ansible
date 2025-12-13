@@ -5,7 +5,7 @@
   gather_facts: false
 
   vars:
-    local_file_path: "{{ lookup('env', 'CI_PROJECT_DIR') }}/files/myfile.txt"
+    local_file_path: "{{ lookup('env', 'WORKSPACE') }}/files/myfile.txt"
     s3_bucket: "28may2025"
     s3_key: ""
     aws_region: "ap-southeast-1"
