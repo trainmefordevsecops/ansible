@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize Jenkins failure logs via Ollama or OpenAI-compatible API."""
+"""Summarize Jenkins failure logs via configured AI provider or log parsing."""
 
 from __future__ import annotations
 
@@ -12,15 +12,46 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from typing import Callable
 
-# Common AWS / Ansible error codes in stderr
-_AWS_ERROR = re.compile(r"\((\w+)\)\s+when calling")
-_TASK_NAME = re.compile(r"TASK \[([^\]]+)\]")
-_FATAL_STDERR = re.compile(r'"stderr":\s*"([^"\\]*(?:\\.[^"\\]*)*)"')
-_S3_BUCKET = re.compile(r"s3://([^/]+)/")
-_BUCKET_DOES_NOT_EXIST = re.compile(
-    r"The specified bucket does not exist|NoSuchBucket", re.I
+# Failure line markers — scanned from bottom of log for the most recent failure.
+_FAILURE_LINE = re.compile(
+    r"fatal:\s*\[[^\]]+\]:\s*FAILED!"
+    r"|FAILED!\s*=>"
+    r"|ERROR:\s*"
+    r"|BUILD FAILED"
+    r"|Script returned exit code"
+    r"|non-zero return code"
+    r"|Traceback \(most recent call last\)"
+    r"|npm ERR!"
+    r"|FAILURE:"
+    r"|command not found"
+    r"|No such file or directory"
+    r"|Permission denied"
+    r"|An error occurred \("
+    r"|Exception in thread"
+    r"|FATAL ERROR"
+    r"|AssertionError"
+    r"|Error:\s+",
+    re.I,
 )
+
+_TASK = re.compile(r"TASK \[([^\]]+)\]")
+_STAGE = re.compile(r"stage\s*\{?\s*['\"]?([^'\"}\s]+)", re.I)
+_FATAL_HOST = re.compile(r"fatal:\s*\[([^\]]+)\]:", re.I)
+_JSON_FIELD = re.compile(r'"(stderr|msg|message)":\s*"((?:[^"\\]|\\.)*)"')
+_AWS_CODE = re.compile(r"An error occurred \((\w+)\)", re.I)
+_EXIT_CODE = re.compile(r"(?:exit code|return code)\s+(\d+)", re.I)
+_JENKINS_ERROR = re.compile(r"ERROR:\s*(.+)", re.I)
+
+
+@dataclass
+class FailureInfo:
+    component: str = ""
+    message: str = ""
+    error_code: str = ""
+    source: str = "unknown"
 
 
 def read_log() -> str:
@@ -32,7 +63,115 @@ def read_log() -> str:
         return "(log file not found)"
 
 
-def build_prompt(log: str) -> str:
+def _decode_json_string(raw: str) -> str:
+    try:
+        return json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        return raw.replace("\\n", " ").replace("\\\"", "\"").replace("\\t", " ")
+
+
+def _clean_line(line: str) -> str:
+    line = line.strip()
+    line = re.sub(r"^\+\s*", "", line)  # shell trace prefix
+    return line.strip()
+
+
+def _truncate(text: str, limit: int = 220) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _find_failure_anchor(log: str) -> int:
+    lines = log.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if _FAILURE_LINE.search(lines[index]):
+            return index
+    return max(0, len(lines) - 1)
+
+
+def _last_task_before(lines: list[str], anchor: int) -> str:
+    for index in range(anchor, -1, -1):
+        match = _TASK.search(lines[index])
+        if match:
+            return match.group(1)
+    match = _TASK.search("\n".join(lines))
+    return match.group(1) if match else ""
+
+
+def _extract_json_fields(text: str) -> list[tuple[str, str]]:
+    return [(m.group(1), _decode_json_string(m.group(2))) for m in _JSON_FIELD.finditer(text)]
+
+
+def detect_failure(log: str) -> FailureInfo:
+    lines = [_clean_line(line) for line in log.splitlines()]
+    anchor = _find_failure_anchor(log)
+    window = lines[max(0, anchor - 12) : min(len(lines), anchor + 10)]
+    window_text = "\n".join(window)
+
+    info = FailureInfo()
+    info.component = _last_task_before(lines, anchor)
+
+    stage_match = _STAGE.search(window_text)
+    if stage_match and not info.component:
+        info.component = stage_match.group(1)
+
+    host_match = _FATAL_HOST.search(window_text)
+    if host_match and not info.component:
+        info.component = host_match.group(1)
+
+    for field, value in _extract_json_fields(window_text):
+        if value and (field == "stderr" or not info.message):
+            info.message = value
+            info.source = "ansible"
+
+    aws_match = _AWS_CODE.search(info.message or window_text)
+    if aws_match:
+        info.error_code = aws_match.group(1)
+
+    exit_match = _EXIT_CODE.search(window_text)
+    if exit_match and not info.error_code:
+        info.error_code = f"exit {exit_match.group(1)}"
+
+    for line in reversed(window):
+        if not info.message:
+            jenkins_match = _JENKINS_ERROR.search(line)
+            if jenkins_match:
+                info.message = jenkins_match.group(1).strip()
+                info.source = "jenkins"
+                break
+
+            if _FAILURE_LINE.search(line) and not line.endswith("FAILED! =>"):
+                info.message = line
+                info.source = "log"
+                break
+
+    if not info.message:
+        for line in reversed(window):
+            if line and not line.startswith("[Pipeline]"):
+                info.message = line
+                break
+
+    return info
+
+
+def format_failure_summary(info: FailureInfo) -> str:
+    label = info.component or "build step"
+    detail = _truncate(info.message)
+    if info.error_code and info.error_code not in detail:
+        detail = f"{detail} ({info.error_code})" if detail else info.error_code
+    if detail:
+        return f"Failed: {label} — {detail}"
+    return f"Failed: {label} — see build console for details."
+
+
+def extract_failure_summary(log: str) -> str:
+    return format_failure_summary(detect_failure(log))
+
+
+def build_prompt(log: str, failure: FailureInfo) -> str:
+    detected = format_failure_summary(failure)
     return f"""You are a CI/CD assistant. Summarize this Jenkins build failure.
 
 Return plain text with:
@@ -46,93 +185,69 @@ Job: {os.environ.get("JOB_NAME", "unknown")}
 Build: #{os.environ.get("BUILD_NUMBER", "unknown")}
 URL: {os.environ.get("BUILD_URL", "unknown")}
 
+Detected failure hint: {detected}
+
 Console log (tail):
 {log}
 """
 
 
-def _decode_json_string(raw: str) -> str:
-    try:
-        return json.loads(f'"{raw}"')
-    except json.JSONDecodeError:
-        return raw.replace("\\n", " ").replace("\\\"", "\"")
+def resolve_provider() -> str:
+    explicit = (os.environ.get("AI_PROVIDER") or "").strip().lower()
+    if explicit:
+        return explicit
+
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("AI_BASE_URL")
+    model = os.environ.get("AI_MODEL") or os.environ.get("OPENAI_MODEL")
+
+    if api_key or (base_url and model):
+        return "openai"
+
+    return "ollama"
 
 
-def extract_failure_summary(log: str) -> str:
-    """Build a short summary from the console log when AI is unavailable."""
-    task_match = _TASK_NAME.search(log)
-    task = task_match.group(1) if task_match else "build step"
-
-    stderr = ""
-    stderr_match = _FATAL_STDERR.search(log)
-    if stderr_match:
-        stderr = _decode_json_string(stderr_match.group(1))
-
-    aws_code = ""
-    aws_match = _AWS_ERROR.search(stderr or log)
-    if aws_match:
-        aws_code = aws_match.group(1)
-
-    bucket = ""
-    bucket_match = _S3_BUCKET.search(stderr or log)
-    if bucket_match:
-        bucket = bucket_match.group(1)
-
-    # NoSuchBucket — short, actionable summary
-    if aws_code == "NoSuchBucket" or _BUCKET_DOES_NOT_EXIST.search(stderr or log):
-        target = f"bucket '{bucket}'" if bucket else "the S3 bucket"
-        return (
-            f"Failed: {task} — {target} does not exist ({aws_code or 'NoSuchBucket'}). "
-            f"Create the bucket or update s3_bucket in the playbook."
-        )
-
-    if aws_code == "AccessDenied":
-        return (
-            f"Failed: {task} — AWS denied access ({aws_code}). "
-            "Check IAM permissions for the Jenkins AWS credentials."
-        )
-
-    if stderr:
-        detail = stderr.split("\n")[0].strip()
-        if len(detail) > 200:
-            detail = detail[:197] + "..."
-        return f"Failed: {task} — {detail}"
-
-    if "fatal:" in log.lower() or "FAILED!" in log:
-        return f"Failed: {task} — see build console for details."
-
-    return "Build failed — see console log for details."
-
-
-def ollama_base_url() -> str:
-    return os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-
-
-def ollama_model_name() -> str:
-    return os.environ.get("OLLAMA_MODEL", "llama3.2")
-
-
-def ollama_request(path: str, payload: dict | None = None, timeout: float = 30) -> dict | list:
-    url = ollama_base_url() + path
+def _http_json(
+    url: str,
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 120,
+) -> dict | list:
     data = None
-    headers: dict[str, str] = {}
+    req_headers: dict[str, str] = dict(headers or {})
     if payload is not None:
         data = json.dumps(payload).encode()
-        headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, headers=headers)
+        req_headers.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(url, data=data, headers=req_headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 
-def ollama_is_reachable(timeout: float = 5) -> bool:
+def _model_base(name: str) -> str:
+    return name.split(":")[0]
+
+
+def _ollama_url() -> str:
+    return (os.environ.get("OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
+
+
+def _ollama_model() -> str:
+    return os.environ.get("OLLAMA_MODEL") or os.environ.get("AI_MODEL") or "llama3.2"
+
+
+def _ollama_request(path: str, payload: dict | None = None, timeout: float = 30) -> dict | list:
+    return _http_json(_ollama_url() + path, payload, timeout=timeout)
+
+
+def _ollama_reachable(timeout: float = 5) -> bool:
     try:
-        ollama_request("/api/tags", timeout=timeout)
+        _ollama_request("/api/tags", timeout=timeout)
         return True
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return False
 
 
-def start_ollama_server() -> None:
+def _start_ollama_server() -> None:
     if not shutil.which("ollama"):
         raise RuntimeError("ollama CLI not found; install Ollama on the Jenkins agent")
 
@@ -144,8 +259,8 @@ def start_ollama_server() -> None:
         start_new_session=True,
     )
 
-    for attempt in range(60):
-        if ollama_is_reachable(timeout=2):
+    for _ in range(60):
+        if _ollama_reachable(timeout=2):
             print("Ollama server is ready.", file=sys.stderr)
             return
         time.sleep(1)
@@ -153,34 +268,27 @@ def start_ollama_server() -> None:
     raise RuntimeError("Ollama server did not become ready within 60s")
 
 
-def ensure_ollama_running() -> None:
-    if ollama_is_reachable():
+def _ensure_ollama_running() -> None:
+    if _ollama_reachable():
         return
-    start_ollama_server()
+    _start_ollama_server()
 
 
-def model_base_name(name: str) -> str:
-    return name.split(":")[0]
+def _list_ollama_models() -> list[str]:
+    data = _ollama_request("/api/tags")
+    return [str(item["name"]) for item in data.get("models", []) if item.get("name")]
 
 
-def list_ollama_models() -> list[str]:
-    data = ollama_request("/api/tags")
-    models = data.get("models", [])
-    return [str(item.get("name", "")) for item in models if item.get("name")]
+def _ollama_model_installed(model: str, installed: list[str]) -> bool:
+    base = _model_base(model)
+    return any(_model_base(name) == base for name in installed)
 
 
-def ollama_model_available(model: str, installed: list[str]) -> bool:
-    target = model_base_name(model)
-    return any(model_base_name(name) == target for name in installed)
-
-
-def pull_ollama_model(model: str) -> None:
+def _pull_ollama_model(model: str) -> None:
     timeout = int(os.environ.get("OLLAMA_PULL_TIMEOUT", "600"))
-    url = ollama_base_url() + "/api/pull"
+    url = _ollama_url() + "/api/pull"
     body = json.dumps({"name": model, "stream": True}).encode()
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
-    )
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
 
     print(f"Pulling Ollama model '{model}' (timeout {timeout}s)...", file=sys.stderr)
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -196,68 +304,76 @@ def pull_ollama_model(model: str) -> None:
                 print(status, file=sys.stderr)
 
 
-def ensure_ollama_model(model: str) -> None:
-    installed = list_ollama_models()
-    if ollama_model_available(model, installed):
+def _ensure_ollama_model(model: str) -> None:
+    installed = _list_ollama_models()
+    if _ollama_model_installed(model, installed):
         print(f"Ollama model '{model}' is already available.", file=sys.stderr)
         return
-    pull_ollama_model(model)
+    _pull_ollama_model(model)
 
 
-def prepare_ollama() -> tuple[str, str]:
-    ensure_ollama_running()
-    model = ollama_model_name()
-    ensure_ollama_model(model)
-    return ollama_base_url(), model
+def summarize_with_ollama(prompt: str) -> str:
+    _ensure_ollama_running()
+    model = _ollama_model()
+    _ensure_ollama_model(model)
 
-
-def call_ollama(prompt: str) -> str:
-    base, model = prepare_ollama()
-    url = base + "/api/generate"
-    body = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        data = json.load(response)
+    data = _ollama_request(
+        "/api/generate",
+        {"model": model, "prompt": prompt, "stream": False},
+        timeout=120,
+    )
     return str(data.get("response", "")).strip()
 
 
-def call_openai_compatible(prompt: str) -> str:
-    base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
+def summarize_with_openai(prompt: str) -> str:
+    base = (
+        os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("AI_BASE_URL")
+        or "https://api.openai.com/v1"
+    ).rstrip("/")
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY") or ""
+    model = os.environ.get("AI_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 
-    url = f"{base}/chat/completions"
-    body = json.dumps(
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY or AI_API_KEY is not set")
+
+    data = _http_json(
+        f"{base}/chat/completions",
         {
-            "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            "model": model,
             "messages": [
                 {"role": "system", "content": "Summarize CI/CD failures clearly and briefly."},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-        }
-    ).encode()
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    request = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(request, timeout=120) as response:
-        data = json.load(response)
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=120,
+    )
     return data["choices"][0]["message"]["content"].strip()
+
+
+def summarize_with_ai(prompt: str, provider: str) -> str:
+    providers: dict[str, Callable[[str], str]] = {
+        "ollama": summarize_with_ollama,
+        "openai": summarize_with_openai,
+    }
+    handler = providers.get(provider)
+    if not handler:
+        raise RuntimeError(f"Unsupported AI_PROVIDER: {provider}")
+    return handler(prompt)
 
 
 def main() -> int:
     log = read_log()
-    prompt = build_prompt(log)
-    provider = os.environ.get("AI_PROVIDER", "ollama").lower()
+    failure = detect_failure(log)
+    prompt = build_prompt(log, failure)
+    provider = resolve_provider()
+
+    print(f"Using AI provider: {provider}", file=sys.stderr)
 
     try:
-        if provider == "openai":
-            summary = call_openai_compatible(prompt)
-        else:
-            summary = call_ollama(prompt)
+        summary = summarize_with_ai(prompt, provider)
         header = "========== AI FAILURE SUMMARY =========="
     except (
         urllib.error.URLError,

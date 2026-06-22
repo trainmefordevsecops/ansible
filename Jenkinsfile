@@ -7,15 +7,16 @@ pipeline {
         AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
 
-        // Local Ollama (default) — override in Jenkins job env if needed
-        OLLAMA_URL   = "${env.OLLAMA_URL ?: 'http://127.0.0.1:11434'}"
-        OLLAMA_MODEL = "${env.OLLAMA_MODEL ?: 'llama3.2'}"
-        OLLAMA_PULL_TIMEOUT = "${env.OLLAMA_PULL_TIMEOUT ?: '600'}"
-
-        // Optional OpenAI-compatible API instead of Ollama:
-        // AI_PROVIDER=openai  OPENAI_BASE_URL=...  OPENAI_MODEL=gpt-4o-mini
-        // OPENAI_API_KEY=credentials('openai-api-key')
-        AI_PROVIDER = "${env.AI_PROVIDER ?: 'ollama'}"
+        // AI failure summary (optional — uses Ollama only when nothing else is set):
+        // AI_PROVIDER=openai
+        // AI_MODEL=gpt-4o-mini
+        // AI_API_KEY=credentials('openai-api-key')
+        // AI_BASE_URL=https://api.openai.com/v1
+        //
+        // Ollama fallback env (only when no OpenAI-style config is present):
+        // OLLAMA_URL=http://127.0.0.1:11434
+        // OLLAMA_MODEL=llama3.2
+        // OLLAMA_PULL_TIMEOUT=600
     }
 
     stages {
