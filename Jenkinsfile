@@ -9,6 +9,18 @@ pipeline {
     }
 
     stages {
+        stage('Clean Workspace') {
+            steps {
+                echo 'Deleting all workspace folders and files...'
+                deleteDir()
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }        
         stage('Upload to S3') {
             steps {
                 sh '''
