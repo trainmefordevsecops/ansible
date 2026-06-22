@@ -3,6 +3,10 @@ pipeline {
         label 'mac-machine'
     }
 
+    options {
+        skipDefaultCheckout(true)
+    }
+
     environment {
         AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
@@ -20,6 +24,19 @@ pipeline {
     }
 
     stages {
+        stage('Clean Workspace') {
+            steps {
+                echo 'Deleting all workspace folders and files...'
+                deleteDir()
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Upload to S3') {
             steps {
                 sh '''
