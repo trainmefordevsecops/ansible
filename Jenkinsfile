@@ -10,6 +10,7 @@ pipeline {
         // Local Ollama (default) — override in Jenkins job env if needed
         OLLAMA_URL   = "${env.OLLAMA_URL ?: 'http://127.0.0.1:11434'}"
         OLLAMA_MODEL = "${env.OLLAMA_MODEL ?: 'llama3.2'}"
+        OLLAMA_PULL_TIMEOUT = "${env.OLLAMA_PULL_TIMEOUT ?: '600'}"
 
         // Optional OpenAI-compatible API instead of Ollama:
         // AI_PROVIDER=openai  OPENAI_BASE_URL=...  OPENAI_MODEL=gpt-4o-mini
