@@ -8,7 +8,6 @@ This repository contains resources and links to our Udemy courses, focusing on *
 We provide **professional-level training** in DevSecOps, covering tools and practices used in the industry to secure your applications and infrastructure while embracing DevOps practices.
 
 ## architecture ##
-## Decision Flow
 
 ```text
 Start
@@ -42,7 +41,9 @@ Are OPENAI_BASE_URL and AI_MODEL set?
               └── No
                     ▼
                  Use Ollama
-Jenkins AI Failure Analysis Flow
+
+ Jenkins AI Failure Analysis Flow 
+
 Jenkins Build Failure
         │
         ▼
