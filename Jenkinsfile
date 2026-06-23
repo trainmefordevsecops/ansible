@@ -51,7 +51,7 @@ pipeline {
                     pip3 install --user boto3
 
                     echo "Running Ansible playbook..."
-                    nsible-playbook playbooks/upload_to_s3.yml
+                    ansible-playbook playbooks/upload_to_s3.yml
                 '''
             }
         }
