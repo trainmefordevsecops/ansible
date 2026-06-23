@@ -7,6 +7,75 @@ This repository contains resources and links to our Udemy courses, focusing on *
 ## Course Overview:
 We provide **professional-level training** in DevSecOps, covering tools and practices used in the industry to secure your applications and infrastructure while embracing DevOps practices.
 
+## architecture ##
+## Decision Flow
+
+```text
+Start
+  │
+  ▼
+Is AI_PROVIDER set?
+  │
+  ├── Yes
+  │     │
+  │     ▼
+  │  Return AI_PROVIDER value
+  │
+  └── No
+        │
+        ▼
+Is OPENAI_API_KEY or AI_API_KEY set?
+        │
+        ├── Yes
+        │     ▼
+        │  Use OpenAI-compatible provider
+        │
+        └── No
+              │
+              ▼
+Are OPENAI_BASE_URL and AI_MODEL set?
+              │
+              ├── Yes
+              │     ▼
+              │  Use OpenAI-compatible provider
+              │
+              └── No
+                    ▼
+                 Use Ollama
+Jenkins AI Failure Analysis Flow
+Jenkins Build Failure
+        │
+        ▼
+Collect Last 250 Log Lines
+        │
+        ▼
+Limit to 12,000 Characters
+        │
+        ▼
+Write failure-log.txt
+        │
+        ▼
+Execute jenkins_ai_summary.py
+        │
+        ▼
+Resolve AI Provider
+        │
+        ├── OpenAI
+        ├── Azure OpenAI
+        ├── OpenAI-Compatible APIs
+        └── Ollama
+        │
+        ▼
+Send Logs to LLM
+        │
+        ▼
+Generate Root Cause Analysis
+        │
+        ▼
+Return Human-Readable Summary
+        │
+        ▼
+Publish to Jenkins / Slack / Email
 
 ---
 
